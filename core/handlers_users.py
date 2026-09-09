@@ -28,8 +28,8 @@ from core import cache, messaging, net, views
 from core.constants import CB, MODE
 from core.messaging import esc, footer
 from core.style import G, sc
-from data.catalog import Pool
 from data import store
+from data.catalog import Pool
 
 log = logging.getLogger("users")
 
@@ -84,7 +84,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     for i, label in enumerate(frames, start=1):
         text = f"{head}\n{label}\n{anim.progress_bar(i, len(frames))}"
         await messaging.edit(context, chat_id, msg_id, text)
-        if i < frames and i < len(frames):
+        if i < len(frames):
             await asyncio.sleep(config.ANIM_STEP_SEC)
 
     banned = await cache.banned(uid)
