@@ -69,12 +69,9 @@ _SCHEMA = [
         pos INT NOT NULL DEFAULT 0
     )
     """,
-    """
-    CREATE INDEX IF NOT EXISTS idx_stock_ep_category ON stock_emailpass (category)
-    """,
-    """
-    CREATE INDEX IF NOT EXISTS idx_stock_keys_category ON stock_keys (category)
-    """,
+    # Category indexes are intentionally created by _migrate_vault2(),
+    # after legacy stock tables have received their category columns.
+    # Creating them here would fail startup on a pre-Vault-2 database.
     # per-user "never served twice" history --------------------------
     """
     CREATE TABLE IF NOT EXISTS user_history_email (
