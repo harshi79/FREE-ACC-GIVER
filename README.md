@@ -16,24 +16,62 @@ on every drop, instant in-memory counters and a single-query hot path.
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
-.venv/bin/python bot.py
-```
-
-Configuration lives in `config.py` and every value can be overridden with
-environment variables (recommended — never commit real secrets):
-
-```bash
-BOT_TOKEN=... \
-BOT_OWNER_ID=7728424218 \
-BOT_OWNER_USERNAME=WhoEvenYori \
-BOT_DATABASE_URL=postgres://... \
-.venv/bin/python bot.py
+BOT_TOKEN=... BOT_DATABASE_URL=postgres://... .venv/bin/python bot.py
 ```
 
 > The previous single-file `bot.py` has been fully replaced. The database
 > schema is unchanged (plus the old auto-migration), so **existing users,
-> stock and history are kept**. If you only ever want defaults, edit nothing:
-> `config.py` already carries the same token / owner / database as before.
+> stock and history are kept**.
+
+---
+
+## Deploy on Render (Docker)
+
+The repo ships everything Render needs: a `Dockerfile`, a `render.yaml`
+Blueprint and a tiny built-in **health server** that answers `200` on
+`/healthz` — so Render (or any uptime pinger) can keep the bot warm and
+alive.
+
+**Option A — Blueprint (recommended):**
+1. Push this repo to GitHub.
+2. Render → **New → Blueprint** → pick the repo (`render.yaml` is auto-detected).
+3. When prompted, paste the secrets:
+   - `BOT_TOKEN` — your Telegram token from @BotFather
+   - `BOT_DATABASE_URL` — your Postgres connection string
+4. Deploy. The bot starts polling the moment the container boots.
+
+**Option B — manual Web Service:**
+1. Render → **New → Web Service** → pick the repo (Docker runtime is
+   detected from `Dockerfile`).
+2. Add the same two env vars in **Environment**.
+3. Set **Health Check Path** to `/healthz`.
+4. Deploy.
+
+**Secrets are never hardcoded:** the bot refuses to start (with a clear
+list of what's missing) until `BOT_TOKEN` and `BOT_DATABASE_URL` exist in
+the environment. Optional overrides: `BOT_OWNER_ID`, `BOT_OWNER_USERNAME`,
+`BOT_NAME`, … (all in `config.py`).
+
+### Run the same image locally
+
+```bash
+docker build -t free-acc-giver .
+docker run --rm -p 8000:8000 \
+  -e BOT_TOKEN=... \
+  -e BOT_DATABASE_URL=postgres://... \
+  free-acc-giver
+
+# health check
+curl -i http://localhost:8000/healthz     # -> 200 ok
+```
+
+### Health server
+
+`core/health.py` starts before any database work and binds
+`0.0.0.0:$PORT` (Render injects `PORT`; falls back to `8000`). Every
+route answers `200 "ok"` on GET/HEAD, on a silent daemon thread — it
+never touches the bot's async loop. Web services on Render must bind
+the port quickly or they're restarted; this guarantees that.
 
 ---
 
@@ -88,8 +126,9 @@ users drop a message at the owner (button opens the DM with their id shown).
 ## Code map (multi-file, by design)
 
 ```
-config.py                every setting, env-overridable
-bot.py                   entry point + single callback router + concurrency
+config.py                every setting from env (secrets REQUIRED)
+bot.py                   entry point + callback router + health boot
+Dockerfile · render.yaml Render-ready container + blueprint
 core/
   style.py               small-caps font ᴀʙᴄ + glyph palette (no emoji)
   constants.py           callback codes + text-mode tokens
@@ -99,6 +138,7 @@ core/
   cache.py               TTL counters (stock/users) + banned-state cache
   net.py                 retry-hardened sends / broadcasts
   security.py            owner-only semantics
+  health.py              /healthz HTTP 200 server (Render ping)
   handlers_users.py      member commands + button flows
   handlers_owner.py      owner panel, inboxes, broadcast (hidden)
   handlers_text.py       typed-reply state machine

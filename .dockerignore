@@ -1,0 +1,11 @@
+# Keep the image lean and secrets out of the build context.
+.venv/
+venv/
+__pycache__/
+*.pyc
+.git/
+.gitignore
+.env
+.env.*
+*.log
+tests/

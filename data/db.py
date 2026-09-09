@@ -117,19 +117,24 @@ _SCHEMA = [
 
 
 class Database:
-    def __init__(self, dsn: str = config.DATABASE_URL) -> None:
-        self.dsn = dsn
+    def __init__(self, dsn: str | None = None) -> None:
+        # Read the DSN lazily so environment-injected values (Render)
+        # are picked up even when this module was imported earlier.
+        self._dsn = dsn
         self.pool: asyncpg.Pool | None = None
 
     # ── lifecycle ────────────────────────────────────────────────────
     async def connect(self) -> None:
         if self.pool is not None:
             return
+        dsn = self._dsn or config.DATABASE_URL
+        if not dsn:
+            raise RuntimeError("DATABASE_URL is not set (check environment variables).")
         last_exc: Exception | None = None
         for attempt in range(1, config.DB_CONNECT_MAX_ATTEMPTS + 1):
             try:
                 self.pool = await asyncpg.create_pool(
-                    dsn=self.dsn,
+                    dsn=dsn,
                     min_size=2,
                     max_size=12,
                     command_timeout=20,

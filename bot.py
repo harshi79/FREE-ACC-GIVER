@@ -5,19 +5,24 @@ Run:  python3 bot.py      (from this folder)
 The codebase is split across:
     config.py                 all settings (env-overridable)
     bot.py                    wiring / entry point
-    core/style.py             glyph palette + small-caps font
-    core/constants.py         callback codes + state tokens
-    core/messaging.py         one-message page engine (edit, never spam)
-    core/views.py             every screen (text + inline buttons)
-    core/animation.py         boot / generation motion
-    core/cache.py             instant counters + banned state
-    core/net.py               retry-hardened sends
-    core/security.py          owner-only gates
-    core/handlers_users.py    member flows
-    core/handlers_owner.py    owner panel (hidden from everyone else)
-    core/handlers_text.py     text-mode state machine
-    data/db.py                connection pool + schema
-    data/store.py             every database operation
+    core/style.py                 glyph palette + small-caps font
+    core/constants.py             callback codes + state tokens
+    core/messaging.py             one-message page engine (edit, never spam)
+    core/views.py                 every screen (text + inline buttons)
+    core/animation.py             boot / generation motion
+    core/cache.py                 instant counters + banned state
+    core/net.py                   retry-hardened sends
+    core/security.py              owner-only gates
+    core/health.py                tiny HTTP /healthz server (Render ping)
+    core/handlers_users.py        member flows
+    core/handlers_owner.py        owner panel (hidden from everyone else)
+    core/handlers_text.py         text-mode state machine
+    data/db.py                    connection pool + schema
+    data/store.py                 every database operation
+
+Secrets are NOT in this repo: the bot refuses to start until the
+environment provides BOT_TOKEN and BOT_DATABASE_URL (set them in
+Render → Environment, or export them locally).
 """
 from __future__ import annotations
 
@@ -52,6 +57,7 @@ from telegram.request import HTTPXRequest  # noqa: E402
 
 from core import handlers_owner, handlers_text, handlers_users  # noqa: E402
 from core.constants import CB  # noqa: E402
+from core.health import start_health_server  # noqa: E402
 
 VISIBLE_COMMANDS = [
     BotCommand("start", "Open the hub"),
@@ -115,7 +121,27 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 # ── main ───────────────────────────────────────────────────────
 async def main() -> None:
-    await db.connect()
+    # Secrets come from the environment (Render). Die with a clear
+    # message instead of booting a half-configured bot.
+    missing = config.missing_env()
+    if missing:
+        print("\n[FATAL] missing required environment variables:")
+        for name in missing:
+            print(f"  • {name}  —  {config.REQUIRED_LABELS.get(name, '')}")
+        print("\nSet them in Render → Environment (or export them locally), then restart.\n")
+        raise SystemExit(2)
+
+    assert config.BOT_TOKEN is not None and config.DATABASE_URL is not None
+    # Health endpoint: starts BEFORE the DB work, so Render sees the
+    # service as "live" instantly and keeps pinging it warm.
+    health = start_health_server()
+
+    try:
+        await db.connect()
+    except Exception:
+        if health is not None:
+            health.shutdown()
+        raise
 
     builder: ApplicationBuilder = Application.builder().token(config.BOT_TOKEN)
     builder.request(

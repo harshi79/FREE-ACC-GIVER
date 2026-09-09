@@ -1,13 +1,18 @@
 """
 Cᴇɴᴛʀᴀʟ ᴄᴏɴꜰɪɢᴜʀᴀᴛɪᴏɴ ────────────────
 
-Everything the bot needs to run lives here. Every value can be
-overridden with an environment variable, so you can run:
+Everything the bot needs to run is read from environment variables —
+that is how Render (and every other host) injects secrets. Nothing
+secret is hardcoded in the repo:
 
-    BOT_TOKEN=... BOT_OWNER_ID=... python3 bot.py
+    BOT_TOKEN=... BOT_DATABASE_URL=... python3 bot.py
 
-without touching this file. The defaults below keep it working
-out-of-the-box (same token / owner / database as before).
+Required secrets  (set in Render → Environment or a real .env):
+    BOT_TOKEN          Telegram bot token from @BotFather
+    BOT_DATABASE_URL   PostgreSQL connection string
+
+Optional overrides (safe defaults below, not secret):
+    BOT_OWNER_ID / BOT_OWNER_USERNAME / BOT_NAME / BOT_PAGE_SIZE ...
 """
 from __future__ import annotations
 
@@ -28,12 +33,30 @@ def _float(name: str, default: float) -> float:
         return default
 
 
-# ── Identity ────────────────────────────────────────────────────
-BOT_TOKEN: str = os.environ.get(
-    "BOT_TOKEN",
-    "8819857671:AAFgoU1ij4m7h1MWI-9iMRVjrQja4H1vuQY",
-)
+def _str(name: str, default: str | None) -> str | None:
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return default
+    return value.strip()
 
+
+# ── Secrets (REQUIRED from the environment) ────────────────────
+BOT_TOKEN: str | None = _str("BOT_TOKEN", None)
+DATABASE_URL: str | None = _str("BOT_DATABASE_URL", None)
+
+REQUIRED_ENV = ("BOT_TOKEN", "BOT_DATABASE_URL")
+REQUIRED_LABELS = {
+    "BOT_TOKEN": "Telegram bot token (create one with @BotFather)",
+    "BOT_DATABASE_URL": "PostgreSQL connection string",
+}
+
+
+def missing_env() -> list[str]:
+    """Names of required env vars that are not set (for a clear error)."""
+    return [name for name in REQUIRED_ENV if not os.environ.get(name)]
+
+
+# ── Identity (safe, non-secret defaults) ────────────────────────
 # The ONLY account that can see / use owner tools. No admins, no roles.
 OWNER_ID: int = _int("BOT_OWNER_ID", 7728424218)
 
@@ -44,12 +67,6 @@ OWNER_USERNAME: str = os.environ.get("BOT_OWNER_USERNAME", "WhoEvenYori")
 BOT_NAME: str = os.environ.get("BOT_NAME", "Free Acc Giver")
 
 BOT_TAGLINE: str = os.environ.get("BOT_TAGLINE", "Fast · Smooth · Premium")
-
-# ── Database ────────────────────────────────────────────────────
-DATABASE_URL: str = os.environ.get(
-    "BOT_DATABASE_URL",
-    "postgresql://neondb_owner:npg_vlXzsQ7n2VZg@ep-sweet-smoke-b3rtnp1f-pooler.c-4.ap-southeast-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require",
-)
 
 # ── Plans / limits ──────────────────────────────────────────────
 # name -> (daily limit | None = unlimited, cooldown minutes, features)
