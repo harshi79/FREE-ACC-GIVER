@@ -17,6 +17,7 @@ from typing import Any, AsyncIterator
 import asyncpg
 
 import config
+from data import catalog
 
 log = logging.getLogger("db")
 
@@ -37,11 +38,15 @@ _SCHEMA = [
     )
     """,
     # stock ----------------------------------------------------------
+    # Vault 2.0: every brand/service owns ONE pool; `category` scopes rows
+    # to a pool and pools are never mixed. `stock_*` stay two physical
+    # tables (one per kind), the registry lives in vault_categories.
     """
     CREATE TABLE IF NOT EXISTS stock_emailpass (
         id SERIAL PRIMARY KEY,
         email TEXT UNIQUE,
         password TEXT,
+        category TEXT NOT NULL DEFAULT 'vpn',
         added_by BIGINT,
         added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
@@ -50,9 +55,25 @@ _SCHEMA = [
     CREATE TABLE IF NOT EXISTS stock_keys (
         id SERIAL PRIMARY KEY,
         key TEXT UNIQUE,
+        category TEXT NOT NULL DEFAULT 'pc',
         added_by BIGINT,
         added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
+    """,
+    # pool registry (seeded + owner-extensible, no code change needed) --
+    """
+    CREATE TABLE IF NOT EXISTS vault_categories (
+        category TEXT PRIMARY KEY,
+        label TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        pos INT NOT NULL DEFAULT 0
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_stock_ep_category ON stock_emailpass (category)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_stock_keys_category ON stock_keys (category)
     """,
     # per-user "never served twice" history --------------------------
     """
@@ -167,6 +188,7 @@ class Database:
             for statement in _SCHEMA:
                 await conn.execute(statement)
             await _migrate_user_limits(conn)
+            await _migrate_vault2(conn)
 
     # ── low-level helpers ───────────────────────────────────────────
     @asynccontextmanager
@@ -223,3 +245,47 @@ async def _migrate_user_limits(conn: asyncpg.Connection) -> None:
         log.info("Migrated user_limits primary key to (user_id, date).")
     except Exception:  # noqa: BLE001
         log.exception("user_limits migration failed (non-fatal).")
+
+
+async def _migrate_vault2(conn: asyncpg.Connection) -> None:
+    """
+    Vault 2.0 migration (idempotent, runs on every startup):
+
+    1. add the `category` column to each stock table if absent — the
+       DEFAULT backfills every legacy row into its legacy pool
+       (old email:pass -> 'vpn', old keys -> 'pc') without touching
+       per-user served history, which stays exactly as it was;
+    2. seed the vault_categories registry (existing pools are kept).
+    """
+    try:
+        for table, default_cat in (("stock_emailpass", "vpn"), ("stock_keys", "pc")):
+            has = await conn.fetchval(
+                """
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = $1 AND column_name = 'category'
+                """,
+                table,
+            )
+            if has is None:
+                await conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN category TEXT NOT NULL "
+                    f"DEFAULT '{default_cat}'"
+                )
+                log.info("Vault 2.0: %s.category added (legacy rows -> '%s').", table, default_cat)
+            await conn.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_{table}_category ON {table} (category)"
+            )
+        for category, label, kind, pos in catalog.seed_sql():
+            await conn.execute(
+                """
+                INSERT INTO vault_categories (category, label, kind, pos)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (category) DO NOTHING
+                """,
+                category,
+                label,
+                kind,
+                pos,
+            )
+    except Exception:  # noqa: BLE001
+        log.exception("Vault 2.0 migration failed (non-fatal).")

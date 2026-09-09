@@ -7,18 +7,19 @@ The codebase is split across:
     bot.py                    wiring / entry point
     core/style.py                 glyph palette + small-caps font
     core/constants.py             callback codes + state tokens
-    core/messaging.py             one-message page engine (edit, never spam)
+    core/messaging.py             live-menu page engine + result-card memory
     core/views.py                 every screen (text + inline buttons)
     core/animation.py             boot / generation motion
-    core/cache.py                 instant counters + banned state
+    core/cache.py                 instant counters + pool snapshot + banned state
     core/net.py                   retry-hardened sends
     core/security.py              owner-only gates
     core/health.py                tiny HTTP /healthz server (Render ping)
     core/handlers_users.py        member flows
-    core/handlers_owner.py        owner panel (hidden from everyone else)
+    core/handlers_owner.py        owner panel + vault manager (hidden from everyone else)
     core/handlers_text.py         text-mode state machine
-    data/db.py                    connection pool + schema
-    data/store.py                 every database operation
+    data/db.py                    connection pool + schema + vault 2.0 migration
+    data/catalog.py               pool registry seeds, slugs, collision rules
+    data/store.py                 every database operation (per-pool)
 
 Secrets are NOT in this repo: the bot refuses to start until the
 environment provides BOT_TOKEN and BOT_DATABASE_URL (set them in
@@ -75,34 +76,57 @@ VISIBLE_COMMANDS = [
 # ── single callback router ─────────────────────────────────────
 def _toast_for(data: str, owner: bool) -> str | None:
     if data.startswith(CB["FB_WORK"] + ":"):
-        return "+1 rep"
+        return "logged ✓"
     if data.startswith(CB["FB_DEAD"] + ":"):
-        return "slot pulled from pool"
+        return "dead logged — owner notified"
     if data.startswith(CB["FB_SKIP"] + ":"):
         return "skipped" if owner else "−1 rep"
     return None
 
 
-async def route_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+# per-chat lock: taps from ONE chat are processed strictly one at a
+# time (no double-tap double-pulls, no interleaved edits on the live
+# page), while different chats still run concurrently.
+_CHAT_LOCKS: dict[int, asyncio.Lock] = {}
+
+
+def _chat_lock(chat_id: int) -> asyncio.Lock:
+    if len(_CHAT_LOCKS) > 4096:  # keep it bounded
+        for key in [k for k, v in _CHAT_LOCKS.items() if not v.locked()]:
+            _CHAT_LOCKS.pop(key, None)
+    return _CHAT_LOCKS.setdefault(chat_id, asyncio.Lock())
+
+
+async def route_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Returns True when the tap was handled (selftest verifies coverage)."""
     query = update.callback_query
     if query is None:
-        return
+        return False
     data = query.data or ""
     uid = update.effective_user.id if update.effective_user else 0
+    chat_id = query.message.chat_id if query.message else uid
     owner = store.is_owner(uid)
 
-    # always answer once (stops the client spinner instantly)
-    try:
-        await query.answer(_toast_for(data, owner), show_alert=False)
-    except BadRequest:
-        pass
+    async with _chat_lock(chat_id):
+        # owner codes answer themselves (dynamic toasts: errors included)
+        if owner and handlers_owner.owner_codes(data):
+            if await handlers_owner.owner_callback(update, context):
+                return True
+            # registered prefix but no branch matched — answer & swallow
+            try:
+                await query.answer()
+            except BadRequest:
+                pass
+            return True
 
-    # owner panel routes first; the router inside re-checks ownership
-    if owner and handlers_owner.owner_codes(data):
-        if await handlers_owner.owner_callback(update, context):
-            return
-    # member space (also serves the owner's member pages)
-    await handlers_users.user_callback(update, context)
+        # always answer once (stops the client spinner instantly)
+        try:
+            await query.answer(_toast_for(data, owner), show_alert=False)
+        except BadRequest:
+            pass
+
+        # member space (also serves the owner's member pages)
+        return await handlers_users.user_callback(update, context)
 
 
 # ── error handling ─────────────────────────────────────────────
@@ -181,6 +205,7 @@ async def main() -> None:
     app.add_handler(CommandHandler("users", handlers_owner.cmd_users))
     app.add_handler(CommandHandler("manage", handlers_owner.cmd_manage))
     app.add_handler(CommandHandler("export", handlers_owner.cmd_export))
+    app.add_handler(CommandHandler("admin", handlers_owner.cmd_admin))
 
     # ── text-mode state machine ────────────────────────────────
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers_text.process_text))

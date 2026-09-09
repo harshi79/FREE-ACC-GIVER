@@ -12,7 +12,9 @@ Required secrets  (set in Render → Environment or a real .env):
     BOT_DATABASE_URL   PostgreSQL connection string
 
 Optional overrides (safe defaults below, not secret):
-    BOT_OWNER_ID / BOT_OWNER_USERNAME / BOT_NAME / BOT_PAGE_SIZE ...
+    BOT_OWNER_ID / BOT_OWNER_USERNAME / BOT_NAME / BOT_PAGE_SIZE
+    BOT_AUTO_REMOVE_DEAD (default "0" — dead reports NEVER auto-delete a
+    stock row; the owner reviews it in Vault manager instead) ...
 """
 from __future__ import annotations
 
@@ -108,3 +110,13 @@ DB_CONNECT_MAX_ATTEMPTS: int = _int("BOT_DB_ATTEMPTS", 6)
 
 # ── Stock counts shown on buttons (nice, not a leak) ─────────────
 SHOW_STOCK_ON_BUTTONS: bool = os.environ.get("BOT_SHOW_STOCK", "1") not in ("0", "false", "False")
+
+# ── Dead feedback policy ──────────────────────────────────────────
+# OFF (default): a [✗] Dead mark NEVER deletes the stock row. The item
+# stays in its pool, the owner gets the ping and decides. Set
+# BOT_AUTO_REMOVE_DEAD=1 to let dead reports auto-pull the slot.
+AUTO_REMOVE_DEAD: bool = os.environ.get("BOT_AUTO_REMOVE_DEAD", "0").strip().lower() in ("1", "true", "yes", "on")
+
+# ── Vault pools ───────────────────────────────────────────────────
+# Hard cap for pool slug length (callback payloads stay tiny).
+POOL_SLUG_MAX: int = _int("BOT_POOL_SLUG_MAX", 24)

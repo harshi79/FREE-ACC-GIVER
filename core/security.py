@@ -15,7 +15,15 @@ def is_owner(uid: int) -> bool:
 
 
 def owner_text_reply_expected(mode: str) -> bool:
-    return mode in ("add_ep", "add_key", "search_user", "broadcast")
+    return mode in (
+        "add_stock",
+        "search_user",
+        "broadcast",
+        "new_pool",
+        "pool_rm",
+        "reset_confirm",
+        "reset_pool",
+    )
 
 
 def user_text_reply_expected(mode: str) -> bool:
