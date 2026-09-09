@@ -14,18 +14,23 @@ from typing import Any
 
 import asyncpg
 
+import config
 from config import (
     INITIAL_REPUTATION,
     OWNER_ID,
     PLAN_COOLDOWN_MINUTES,
     PLAN_LIMITS,
 )
+from data import catalog
 from data.db import db
 
 log = logging.getLogger("store")
 
 # ----------------------------------------------------------------------
 # Mapping: short kind  ->  physical table names / columns
+# Vault 2.0: rows inside each table are scoped to a pool (category).
+# Claims NEVER fall back to another pool — the category filter is part
+# of the claim itself.
 # ----------------------------------------------------------------------
 _STOCK = {
     "ep": {
@@ -56,6 +61,7 @@ class ServeResult:
     limit: int | None = None
     wait_sec: int = 0
     item: dict[str, Any] | None = None
+    pool_label: str = ""        # vault 2.0: the pool this drop came from
 
 
 @dataclass
@@ -67,6 +73,9 @@ class FeedbackResult:
     ban_reason: str = ""
     removed: dict[str, Any] | None = None
     removed_word: str = ""
+    pool_label: str = ""        # pool the verdict refers to (shown on the card)
+    item: dict[str, Any] | None = None   # dead reports keep the item data
+    kept: bool = False           # dead but NOT deleted (auto-remove off)
 
 
 @dataclass
@@ -219,9 +228,12 @@ async def serve_claim(
     username: str | None,
     first_name: str | None,
     kind: str,
+    category: str,
     *,
     owner: bool = False,
+    pool_label: str = "",
 ) -> ServeResult:
+    """Serve exactly ONE item from exactly ONE pool (never a fallback)."""
     meta = _STOCK[kind]
     table, history = meta["table"], meta["history"]
     today = date.today()
@@ -265,7 +277,9 @@ async def serve_claim(
                     elapsed = (now - last_gen).total_seconds()
                     if elapsed < cooldown_min * 60:
                         wait = int(cooldown_min * 60 - elapsed) + 1
-                        return ServeResult(status="cooldown", plan=plan, wait_sec=wait)
+                        return ServeResult(
+                            status="cooldown", plan=plan, wait_sec=wait, pool_label=pool_label
+                        )
 
             lim = plan_limit(plan)
             if lim is not None:
@@ -278,29 +292,37 @@ async def serve_claim(
                     or 0
                 )
                 if daily >= lim:
-                    return ServeResult(status="limit", plan=plan, daily=daily, limit=lim)
+                    return ServeResult(
+                        status="limit", plan=plan, daily=daily, limit=lim, pool_label=pool_label
+                    )
 
-        # 3) claim one untouched item + record it, atomically
+        # 3) claim one untouched item from THIS POOL ONLY + record it,
+        #    atomically — an exhausted pool never borrows from another
         async with conn.transaction():
             cols = meta["cols"]
-            select_cols = ", ".join(f"s.{c}" for c in ("id",) + cols)
+            select_cols = ", ".join(f"s.{c}" for c in ("id", "category") + cols)
             row = await conn.fetchrow(
                 f"""
                 SELECT {select_cols}
                 FROM {table} s
                 LEFT JOIN {history} h ON h.item_id = s.id AND h.user_id = $1
-                WHERE h.item_id IS NULL
+                WHERE h.item_id IS NULL AND s.category = $2
                 ORDER BY s.id
                 LIMIT 1
                 FOR UPDATE OF s SKIP LOCKED
                 """,
                 uid,
+                category,
             )
             if row is None:
-                return ServeResult(status="empty", plan=plan, daily=daily, limit=plan_limit(plan))
+                return ServeResult(
+                    status="empty", plan=plan, daily=daily, limit=plan_limit(plan),
+                    pool_label=pool_label,
+                )
 
             item = dict(row)
             item["kind"] = kind
+            item["pool_label"] = pool_label
             item_id = item["id"]
 
             await conn.execute(
@@ -332,7 +354,8 @@ async def serve_claim(
             or 0
         )
         return ServeResult(
-            status="ok", plan=plan, daily=daily, limit=plan_limit(plan), item=item
+            status="ok", plan=plan, daily=daily, limit=plan_limit(plan),
+            item=item, pool_label=pool_label,
         )
 
 
@@ -350,7 +373,60 @@ async def stock_counts() -> dict[str, int]:
     return {"ep": int(row["ep"]), "key": int(row["keys"])}
 
 
-async def add_items(uid: int, kind: str, lines: list[str]) -> AddResult:
+# ── pool registry (vault 2.0) ──────────────────────────────────
+_POOL_ORDER_SQL = (
+    "ORDER BY CASE kind WHEN 'ep' THEN 0 ELSE 1 END, pos, label"
+)
+
+
+async def vault_categories() -> list[asyncpg.Record]:
+    """The whole registry, accounts pools first then key pools, in pos order."""
+    return await db.fetch(
+        f"SELECT category, label, kind, pos FROM vault_categories {_POOL_ORDER_SQL}"
+    )
+
+
+async def pool_counts() -> list[asyncpg.Record]:
+    """Live per-pool counts across both kinds in ONE query (GROUP BY)."""
+    return await db.fetch(
+        """
+        SELECT 'ep' AS kind, category, COUNT(*) AS n FROM stock_emailpass GROUP BY category
+        UNION ALL
+        SELECT 'key' AS kind, category, COUNT(*) AS n FROM stock_keys GROUP BY category
+        """
+    )
+
+
+async def create_pool(label: str, kind: str) -> tuple[str, str]:
+    """
+    Register a brand-new pool. Returns (category, error) — error is one of
+    "" | "bad_name" | "name_exists" | "busy". Slug collisions (different
+    name, same slug) are resolved with a numeric suffix.
+    """
+    clean = " ".join((label or "").split())[:60]
+    base = catalog.slugify(clean)
+    if not clean or not base:
+        return "", "bad_name"
+    existing = await vault_categories()
+    if catalog.label_key(clean) in {catalog.label_key(r["label"]) for r in existing}:
+        return "", "name_exists"
+    taken = {r["category"] for r in existing}
+    slug, _ = catalog.free_slug(base, taken)
+    if not slug:
+        return "", "busy"
+    pos = max((r["pos"] for r in existing if r["kind"] == kind), default=-1) + 1
+    await db.execute(
+        "INSERT INTO vault_categories (category, label, kind, pos) VALUES ($1, $2, $3, $4)",
+        slug,
+        clean,
+        kind,
+        pos,
+    )
+    return slug, ""
+
+
+# ── per-pool stock operations ────────────────────────────────────
+async def add_items(uid: int, kind: str, category: str, lines: list[str]) -> AddResult:
     meta = _STOCK[kind]
     table = meta["table"]
     cols = meta["cols"]
@@ -366,10 +442,14 @@ async def add_items(uid: int, kind: str, lines: list[str]) -> AddResult:
                 out.failed_lines.append(line)
                 continue
             try:
+                placeholders = ", ".join(
+                    "$" + str(i) for i in range(1, len(cols) + 2)
+                )
                 await conn.execute(
-                    f"INSERT INTO {table} ({', '.join(cols)}, added_by) "
-                    f"VALUES ({', '.join('$' + str(i) for i in range(1, len(cols) + 1))}, ${len(cols) + 1})",
+                    f"INSERT INTO {table} ({', '.join(cols)}, category, added_by) "
+                    f"VALUES ({placeholders}, ${len(cols) + 2})",
                     *values,
+                    category,
                     uid,
                 )
                 out.added += 1
@@ -382,19 +462,45 @@ async def add_items(uid: int, kind: str, lines: list[str]) -> AddResult:
     return out
 
 
-async def remove_item(kind: str, item_id: int) -> dict[str, Any] | None:
+async def remove_item(kind: str, category: str, item_id: int) -> dict[str, Any] | None:
+    """
+    Remove one row BY ID, scoped to its pool (an id living in another pool
+    is not touched). Also clears the served-history references so the id is
+    fully gone. Returns the removed row (for the toast) or None.
+    """
     meta = _STOCK[kind]
-    table = meta["table"]
-    cols = ("id",) + meta["cols"]
-    select_cols = ", ".join(cols)
+    table, history = meta["table"], meta["history"]
+    cols = ", ".join(("id", "category") + meta["cols"])
     async with db.conn() as conn:
         row = await conn.fetchrow(
-            f"SELECT {select_cols} FROM {table} WHERE id = $1", item_id
+            f"SELECT {cols} FROM {table} WHERE id = $1 AND category = $2",
+            item_id,
+            category,
         )
         if row is None:
             return None
         await conn.execute(f"DELETE FROM {table} WHERE id = $1", item_id)
+        await conn.execute(f"DELETE FROM {history} WHERE item_id = $1", item_id)
         return dict(row)
+
+
+async def reset_pool(kind: str, category: str) -> int:
+    """Wipe one pool only — stock + its served-history references. Returns count."""
+    meta = _STOCK[kind]
+    table, history = meta["table"], meta["history"]
+    async with db.conn() as conn:
+        n = int(
+            await conn.fetchval(
+                f"SELECT COUNT(*) FROM {table} WHERE category = $1", category
+            )
+            or 0
+        )
+        await conn.execute(
+            f"DELETE FROM {history} WHERE item_id IN (SELECT id FROM {table} WHERE category = $1)",
+            category,
+        )
+        await conn.execute(f"DELETE FROM {table} WHERE category = $1", category)
+        return n
 
 
 async def reset_all_stock() -> None:
@@ -406,13 +512,45 @@ async def reset_all_stock() -> None:
 
 
 async def export_stock() -> tuple[str, int, int]:
-    ep_rows = await db.fetch("SELECT email, password FROM stock_emailpass ORDER BY id")
-    key_rows = await db.fetch("SELECT key FROM stock_keys ORDER BY id")
-    parts = [f"Email:Pass  ({len(ep_rows)})"]
-    parts += [f"{r['email']}:{r['password']}" for r in ep_rows]
-    parts.append(f"Keys  ({len(key_rows)})")
-    parts += [r["key"] for r in key_rows]
+    """Full export, sectioned PER POOL so nothing is ever mixed up."""
+    pools = {r["category"]: r["label"] for r in await vault_categories()}
+    ep_rows = await db.fetch(
+        "SELECT category, email, password FROM stock_emailpass ORDER BY category, id"
+    )
+    key_rows = await db.fetch("SELECT category, key FROM stock_keys ORDER BY category, id")
+    parts: list[str] = []
+
+    def emit(header: str, rows: list[str]) -> None:
+        parts.append(header)
+        parts.extend(rows)
+
+    for cat in dict.fromkeys([r["category"] for r in ep_rows] + [r["category"] for r in key_rows]):
+        cat_ep = [f"{r['email']}:{r['password']}" for r in ep_rows if r["category"] == cat]
+        cat_key = [r["key"] for r in key_rows if r["category"] == cat]
+        if not cat_ep and not cat_key:
+            continue
+        emit(f"── {pools.get(cat, cat)}  ({len(cat_ep) + len(cat_key)})", [])
+        if cat_ep:
+            emit("email:pass:", cat_ep)
+        if cat_key:
+            emit("keys:", cat_key)
     return "\n".join(parts), len(ep_rows), len(key_rows)
+
+
+async def export_pool(kind: str, category: str) -> tuple[str, int]:
+    """Export one pool only. Returns (content, count)."""
+    meta = _STOCK[kind]
+    table = meta["table"]
+    cols = meta["cols"]
+    select_cols = ", ".join(cols)
+    rows = await db.fetch(
+        f"SELECT {select_cols} FROM {table} WHERE category = $1 ORDER BY id", category
+    )
+    if kind == "ep":
+        lines = [f"{r['email']}:{r['password']}" for r in rows]
+    else:
+        lines = [r["key"] for r in rows]
+    return "\n".join(lines), len(lines)
 
 
 # ======================================================================
@@ -425,11 +563,18 @@ async def record_feedback(
     verdict: str,
     *,
     owner: bool = False,
+    category: str = "",
+    pool_label: str = "",
 ) -> FeedbackResult:
+    """
+    Log a verdict for one item. DEAD reports are quiet bookkeeping: the
+    row STAYS in its pool (kept=True) so the owner decides — unless
+    config.AUTO_REMOVE_DEAD is on, which restores auto-pull.
+    """
     meta = _STOCK[kind]
-    table = meta["table"]
+    table, history = meta["table"], meta["history"]
     word = meta["word"]
-    res = FeedbackResult(verdict=verdict)
+    res = FeedbackResult(verdict=verdict, pool_label=pool_label)
 
     async with db.conn() as conn:
         await conn.execute(
@@ -444,14 +589,27 @@ async def record_feedback(
         )
 
         if verdict == "dead":
-            cols = ("id",) + meta["cols"]
+            cols = ", ".join(("id", "category") + meta["cols"])
             row = await conn.fetchrow(
-                f"SELECT {', '.join(cols)} FROM {table} WHERE id = $1", item_id
+                f"SELECT {cols} FROM {table} WHERE id = $1", item_id
             )
             if row is not None:
-                await conn.execute(f"DELETE FROM {table} WHERE id = $1", item_id)
-                res.removed = dict(row)
-                res.removed_word = word
+                res.item = dict(row)
+                if not res.pool_label:
+                    res.pool_label = str(
+                        await conn.fetchval(
+                            "SELECT label FROM vault_categories WHERE category = $1",
+                            row["category"],
+                        )
+                        or row["category"]
+                    )
+                if config.AUTO_REMOVE_DEAD:
+                    await conn.execute(f"DELETE FROM {table} WHERE id = $1", item_id)
+                    await conn.execute(f"DELETE FROM {history} WHERE item_id = $1", item_id)
+                    res.removed = dict(row)
+                    res.removed_word = word
+                else:
+                    res.kept = True     # never auto-removed — owner reviews
         elif verdict == "working":
             new_rep = await conn.fetchval(
                 "UPDATE users SET reputation = reputation + 1 "

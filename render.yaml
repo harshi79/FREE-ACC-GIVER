@@ -28,6 +28,8 @@ services:
       - key: BOT_DATABASE_URL
         sync: false
       # ── non-secret overrides (safe defaults already in config.py) ─
+      - key: BOT_AUTO_REMOVE_DEAD
+        value: "0"
       - key: BOT_OWNER_ID
         value: 7728424218
       - key: BOT_OWNER_USERNAME

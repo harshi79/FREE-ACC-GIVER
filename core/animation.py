@@ -65,23 +65,36 @@ def config_name() -> str:
     return BOT_NAME
 
 
-async def gen_flourish(query, kind_label: str, *, fast: bool = False, wait: float = 0.34) -> None:
+async def gen_flourish(
+    bot, chat_id: int, message_id: int, pool_label: str,
+    *, fast: bool = False, wait: float = 0.34,
+) -> None:
     """
-    Live 'fetching' motion before a generated account lands.
-    fast=True (owner) collapses it to a single beat so the owner never waits.
+    Live 'fetching' motion BEFORE the generated drop lands — it runs on
+    the FRESH card message (already sent), so previous result cards on
+    screen are never edited or wiped. fast=True (owner) collapses it to
+    a single beat so the owner never waits.
     """
-    if fast:
-        steps = 1
-    else:
-        steps = 3
+    steps = 1 if fast else 3
     lines = [
-        f"{G.ARR} ʀᴇsᴇʀᴠɪɴɢ ʏᴏᴜʀ {kind_label}",
+        f"{G.ARR} ʀᴇsᴇʀᴠɪɴɢ ʏᴏᴜʀ ᴅʀᴏᴘ",
         f"{G.ARR} sᴇᴀʟɪɴɢ sʟᴏᴛ",
         f"{G.ARR} ᴅᴇʟɪᴠᴇʀɪɴɢ",
     ]
+    head = f"{sc('Vault Dispatch')}  ·  {sc(pool_label)}"
     for i in range(1, steps + 1):
         line = lines[i - 1] if i <= len(lines) else lines[-1]
-        text = f"{sc('Vault Dispatch')}\n{G.LINE_S}\n{line} {_SPIN[i % 4]}\n{progress_bar(i, steps)}"
-        await _edit(query, text, None)
+        text = f"{head}\n{G.LINE_S}\n{line} {_SPIN[i % 4]}\n{progress_bar(i, steps)}"
+        try:
+            await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text)
+        except Exception as exc:  # noqa: BLE001
+            if "not modified" not in str(exc).lower():
+                log.debug("gen flourish edit skipped: %s", type(exc).__name__)
+            return
         if i < steps:
             await asyncio.sleep(wait)
+
+
+def loading_frame(pool_label: str) -> str:
+    """The first frame of a new card, sent before the flourish starts."""
+    return f"{sc('Vault Dispatch')}  ·  {sc(pool_label)}\n{G.LINE_S}\n{G.ARR} ʀᴇsᴇʀᴠɪɴɢ ʏᴏᴜʀ ᴅʀᴏᴘ ▘"
