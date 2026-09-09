@@ -551,7 +551,7 @@ async def owner_text(update: Update, context: ContextTypes.DEFAULT_TYPE, mode: s
             )
             await _refresh_or_send(context, update, page_text, kb)
             return True
-        lines = [l for l in text.splitlines() if l.strip()]
+        lines = [ln for ln in text.splitlines() if ln.strip()]
         result = await store.add_items(uid, pool.kind, pool.category, lines)
         cache.pools_invalidate()
         page_text, kb = views.owner_add_done(pool, result.added, result.failed)

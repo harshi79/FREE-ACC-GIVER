@@ -28,9 +28,9 @@ import config  # noqa: E402
 
 config.ANIM_STEP_SEC = 0.01  # keep the harness snappy
 
+import core.cache as cache  # noqa: E402
 import data.catalog as catalog  # noqa: E402
 import data.store as store  # noqa: E402
-import core.cache as cache  # noqa: E402
 from core.style import sc as _sc  # noqa: E402
 
 EPOCH = datetime.now() - timedelta(days=3)
@@ -330,6 +330,7 @@ async def _f_notify(context, chat_id, text, markup=None, parse_mode=None):
 
 
 import core.net as net  # noqa: E402
+
 net.notify = _f_notify
 
 
@@ -543,7 +544,7 @@ async def render_views() -> dict:
 
     print("\n--- unique glyphs used across all pages ---")
     glyphs = set()
-    for name, fn in renderers.items():
+    for _name, fn in renderers.items():
         try:
             out = fn()  # type: ignore[misc]
             text, _kb = await out if inspect.iscoroutine(out) else out  # type: ignore[misc]
@@ -1128,6 +1129,22 @@ async def tap_flows() -> None:
     # per-chat lock: a second tap while one is in flight waits (no double pull)
     lock_ok = await double_tap_check()
     check("per-chat lock serialises taps", lock_ok)
+
+    # boot flow: /start animates through every frame on ONE message, then
+    # lands on the home hub — a crash between frames kills the whole command
+    from core import handlers_users
+
+    sctx = FakeCtx()
+    await handlers_users.cmd_start(_CmdUpdate(UID, []), sctx)
+    boot_mids = [mid for (cid, mid) in sctx.bot.messages if cid == UID]
+    boot_edits = [mid for (cid, mid) in sctx.bot.edited if cid == UID and mid in boot_mids]
+    check("start: frames animate on the one boot message",
+          len(boot_mids) == 1 and len(boot_edits) >= 4,  # 3 motion frames + final hub
+          f"mids={boot_mids} edits={len(boot_edits)}x{boot_edits[:1]}")
+    boot_text = sctx.bot.messages.get((UID, boot_mids[0]), "")
+    check("start: lands on the home hub", "vault live" in boot_text and "hello" in boot_text,
+          boot_text[:120])
+    check("start: mode not armed", sctx.user_data.get("mode") is None)
 
 
 async def double_tap_check() -> bool:

@@ -13,12 +13,11 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 import config
-from core import cache, messaging, net, views
+from core import cache, handlers_owner, messaging, net, views
 from core.constants import MODE
 from core.messaging import esc
 from core.style import G
 from data import store
-from core import handlers_owner
 
 log = logging.getLogger("text")
 

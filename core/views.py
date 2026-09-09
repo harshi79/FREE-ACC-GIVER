@@ -23,6 +23,7 @@ from core.style import G, sc
 from data import store
 from data.catalog import KIND_SHORT, Pool, clip, pool_row_label
 
+
 # ────────────────────────────────────────────────────────────────
 #  tiny helpers
 # ────────────────────────────────────────────────────────────────

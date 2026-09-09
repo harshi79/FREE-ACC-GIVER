@@ -9,10 +9,11 @@ from __future__ import annotations
 import asyncio
 import logging
 
-import config
 from telegram import InlineKeyboardMarkup
 from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
 from telegram.ext import ContextTypes
+
+import config
 
 log = logging.getLogger("net")
 
