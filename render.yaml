@@ -1,0 +1,36 @@
+# Render Blueprint for FREE-ACC-GIVER
+#
+# How to use:
+#   1. Push this repo to GitHub.
+#   2. In Render: New -> Blueprint -> pick the repo.
+#      (Or: New -> Web Service -> pick the repo; runtime Docker is
+#      detected from the Dockerfile; set Health Check Path to /healthz.)
+#   3. Render will ask for the secrets below — paste:
+#        BOT_TOKEN        = the token from @BotFather
+#        BOT_DATABASE_URL = your Postgres connection string
+#      (They are marked sync:false so values stay private in the dashboard.)
+#
+# The service answers 200 on /healthz the moment it boots, so Render's
+# health check keeps the bot alive and any uptime pinger can hit it.
+
+services:
+  - type: web
+    name: free-acc-giver
+    runtime: docker
+    repo: https://github.com/harshi79/FREE-ACC-GIVER
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      # ── secrets (set once in the Render dashboard) ─────────────
+      - key: BOT_TOKEN
+        sync: false
+      - key: BOT_DATABASE_URL
+        sync: false
+      # ── non-secret overrides (safe defaults already in config.py) ─
+      - key: BOT_OWNER_ID
+        value: 7728424218
+      - key: BOT_OWNER_USERNAME
+        value: WhoEvenYori
+      - key: BOT_NAME
+        value: Free Acc Giver
